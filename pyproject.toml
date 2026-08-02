@@ -5,7 +5,7 @@ description = "TradingView MCP server for Claude - Multi-asset trading assistant
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "mcp[cli]>=1.12.0",
+    "mcp[cli]>=1.12.0,<2",
     "python-dotenv>=1.0.0",
     "requests>=2.31.0",
 ]
