@@ -57,8 +57,11 @@ def fail(msg: str, command: str = "") -> None:
     _failed.append((msg, command))
 
 
+TOTAL_STEPS = 8
+
+
 def step(n: int, title: str) -> None:
-    print(f"\n[{n}/6] {title}")
+    print(f"\n[{n}/{TOTAL_STEPS}] {title}")
 
 
 def run(args: list[str], **kw) -> subprocess.CompletedProcess:
@@ -340,9 +343,114 @@ def check_health() -> bool:
         proc.kill()
 
 
+def find_claude_desktop() -> Path | None:
+    """Locate the Claude Desktop executable on Windows."""
+    if not IS_WINDOWS:
+        return None
+    roots = [
+        Path(os.environ.get("LOCALAPPDATA", "")) / "AnthropicClaude",
+        Path(os.environ.get("PROGRAMFILES", "")) / "Claude",
+    ]
+    candidates: list[Path] = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        direct = root / "Claude.exe"
+        if direct.exists():
+            candidates.append(direct)
+        # Squirrel-style installs keep versions in app-<version>\ folders.
+        candidates.extend(sorted(root.glob("app-*/Claude.exe")))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def restart_claude(do_restart: bool) -> bool:
+    step(7, "Restart Claude Desktop")
+
+    if not IS_WINDOWS:
+        ok("not Windows - skipping (restart Claude Desktop yourself)")
+        return True
+
+    if not do_restart:
+        print("        skipped (pass --restart to do this automatically)")
+        print("        Claude Desktop must restart before it picks up the config.")
+        print('        cmd:  taskkill /F /IM claude.exe  &&  start "" "%LOCALAPPDATA%\\AnthropicClaude\\Claude.exe"')
+        return True
+
+    exe = find_claude_desktop()
+    subprocess.run(
+        ["taskkill", "/F", "/IM", "claude.exe"],
+        capture_output=True, text=True,
+    )
+    print("        stopped Claude Desktop")
+
+    if exe is None:
+        fail(
+            "could not find Claude.exe to relaunch",
+            'start "" "%LOCALAPPDATA%\\AnthropicClaude\\Claude.exe"',
+        )
+        return False
+
+    subprocess.Popen([str(exe)], creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+    fix(f"restarted Claude Desktop ({exe.name})")
+    return True
+
+
+def check_claude_launched_server(wait_seconds: int = 25) -> bool:
+    """
+    Confirm Claude Desktop actually spawned the server.
+
+    Claude Desktop writes a per-server log; a fresh one after restart is the
+    programmatic equivalent of seeing the server under
+    Developer -> Local MCP Servers.
+    """
+    step(8, "Confirm Claude Desktop launched the server")
+
+    log = claude_config_path().parent / "logs" / f"mcp-server-{SERVER_KEY}.log"
+    print(f"        watching {log}")
+
+    if not IS_WINDOWS:
+        ok("not Windows - skipping (check Developer -> Local MCP Servers)")
+        return True
+
+    import time
+
+    started = time.time()
+    baseline = log.stat().st_mtime if log.exists() else 0.0
+    while time.time() - started < wait_seconds:
+        if log.exists() and log.stat().st_mtime > baseline:
+            break
+        time.sleep(2)
+    else:
+        fail(
+            "Claude Desktop has not started the server yet",
+            "open Claude Desktop, then Settings -> Developer -> Local MCP Servers",
+        )
+        print("        (if Claude Desktop is still starting up, re-run this script)")
+        return False
+
+    tail = log.read_text(encoding="utf-8", errors="replace").splitlines()[-40:]
+    errors = [l for l in tail if "error" in l.lower() or "failed" in l.lower()]
+    if errors:
+        fail("Claude Desktop reported errors starting the server")
+        for line in errors[-6:]:
+            print(f"        {line.strip()[:160]}")
+        return False
+
+    ok("Claude Desktop started the server")
+    print("        it should now be listed under Settings -> Developer -> Local MCP Servers")
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--api-key", help="Alpha Vantage API key (skips the prompt)")
+    parser.add_argument(
+        "--restart",
+        action="store_true",
+        help="stop and relaunch Claude Desktop so it picks up the config",
+    )
     args = parser.parse_args()
 
     print("=" * 62)
@@ -356,8 +464,9 @@ def main() -> int:
         if not fn():
             break
     else:
-        if check_env(args.api_key) and check_registration():
-            check_health()
+        if check_env(args.api_key) and check_registration() and check_health():
+            if restart_claude(args.restart) and args.restart:
+                check_claude_launched_server()
 
     print("\n" + "=" * 62)
     if _fixed:
@@ -375,8 +484,9 @@ def main() -> int:
 
     print(" All checks passed.")
     print("")
-    print(" Next: fully quit Claude Desktop (tray icon -> Quit, not just")
-    print(" closing the window), reopen it, and ask: 'Check server health'")
+    print(" In Claude Desktop, confirm under:")
+    print("   Settings -> Developer -> Local MCP Servers  ->  'tradingview'")
+    print(" then ask it: 'Check server health'")
     print("=" * 62)
     return 0
 
